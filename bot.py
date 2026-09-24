@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
@@ -82,8 +83,6 @@ async def fill_missing_reminders():
         await db.commit()
 
 async def find_friend_name(db, user_id: int, name: str):
-    """Ищет друга по имени без учёта регистра.
-    Делает это в Python, чтобы корректно работало с кириллицей."""
     cursor = await db.execute(
         "SELECT friend_name FROM friends WHERE user_id = ?",
         (user_id,)
@@ -108,7 +107,6 @@ async def check_reminders(bot: Bot):
     current_year = today.year
     
     async with aiosqlite.connect(DB_PATH) as db:
-        # Дни рождения СЕГОДНЯ (только если в этом году ещё не напоминали)
         cursor = await db.execute(
             "SELECT id, user_id, friend_name, last_reminded_year FROM birthdays WHERE strftime('%m-%d', birth_date) = ? AND (last_reminded_year IS NULL OR last_reminded_year != ?)",
             (today_md, current_year)
@@ -125,7 +123,6 @@ async def check_reminders(bot: Bot):
                 (current_year, bday_id)
             )
         
-        # Дни рождения ЗАВТРА (только если в этом году ещё не напоминали)
         cursor = await db.execute(
             "SELECT id, user_id, friend_name, last_reminded_year FROM birthdays WHERE strftime('%m-%d', birth_date) = ? AND (last_reminded_year IS NULL OR last_reminded_year != ?)",
             (tomorrow_md, current_year)
@@ -142,7 +139,6 @@ async def check_reminders(bot: Bot):
                 (current_year, bday_id)
             )
         
-        # Напоминания по уровням близости
         cursor = await db.execute("""
             SELECT f.id, f.user_id, f.friend_name, f.closeness_level, lr.last_reminded_at
             FROM friends f
@@ -167,7 +163,6 @@ async def check_reminders(bot: Bot):
                     (today_full, friend_id)
                 )
         
-        # Разовые события
         cursor = await db.execute(
             "SELECT id, user_id, friend_name, event_date, description, reminded_1day_before, reminded_on_day FROM events"
         )
@@ -208,6 +203,20 @@ async def check_reminders(bot: Bot):
     
     print(">>> Проверка завершена")
 
+# НОВОЕ: Простой веб-сервер для health-check от Render
+async def health_check(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f">>> Веб-сервер запущен на порту {port}")
+
 async def main():
     load_dotenv()
     TOKEN = os.getenv("BOT_TOKEN")
@@ -224,6 +233,9 @@ async def main():
     scheduler.add_job(check_reminders, "cron", hour=9, minute=0, args=[bot])
     scheduler.start()
     print(">>> Планировщик запущен (проверка каждый день в 9:00 МСК)")
+
+    # Запускаем веб-сервер для Render
+    await start_web_server()
 
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message):
